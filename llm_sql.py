@@ -1,4 +1,4 @@
-# llm_sql.py
+#make .env file to add gemini api (GEMINI_API_KEY=AIza...)
 import os
 import google.generativeai as genai
 
