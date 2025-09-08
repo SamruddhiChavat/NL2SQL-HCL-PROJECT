@@ -1,4 +1,3 @@
-# db_exec.py
 import re
 import sqlparse
 import pandas as pd
@@ -20,7 +19,7 @@ def is_select_only(sql: str) -> bool:
     if len(parsed) == 0:
         return False
     for stmt in parsed:
-        # sqlparse sometimes marks complex queries as UNKNOWN → fallback to checking text
+    
         stmt_type = stmt.get_type().upper() if stmt.get_type() else ""
         if stmt_type != "SELECT":
             return False
@@ -37,7 +36,7 @@ def run_sql(sql: str, limit: int = 1000) -> pd.DataFrame:
     safe_sql = enforce_limit(sql, limit)
 
     with engine.connect() as conn:
-        result = conn.execute(text(safe_sql))  # ✅ always wrap in text()
+        result = conn.execute(text(safe_sql))  
         rows = result.fetchall()
         cols = result.keys()
 

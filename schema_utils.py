@@ -1,14 +1,15 @@
-# schema_utils.py
 from sqlalchemy import create_engine, text
 
 DB_PATH = "defects.db"
 engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
 
+# Gets the table schema
 def get_table_schema(table_name: str):
     with engine.connect() as conn:
-        res = conn.execute(text(f"PRAGMA table_info('{table_name}');"))  # ✅ wrap in text()
+        res = conn.execute(text(f"PRAGMA table_info('{table_name}');"))  
         return res.fetchall()
 
+# Converts the schema to text
 def schema_to_text(table_name: str) -> str:
     cols = get_table_schema(table_name)
     schema_lines = []

@@ -1,4 +1,5 @@
-#make .env file to add gemini api (GEMINI_API_KEY=AIza...)
+# Note: Make .env file and add gemini api key (GEMINI_API_KEY=AIza...) before running the project
+
 import os
 import google.generativeai as genai
 
@@ -6,11 +7,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Configure Gemini
+# Configures Gemini
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-MODEL = "gemini-1.5-flash"   # You can change to "gemini-1.5-pro" for more complex tasks
+MODEL = "gemini-1.5-flash"   
 
+# Few shot prompting examples
 FEW_SHOT_EXAMPLES = [
     {
         "nl": "Show top 5 defects with highest repair cost",
@@ -26,10 +28,12 @@ FEW_SHOT_EXAMPLES = [
     },
 ]
 
+# A promt prefix for the model
 PROMPT_PREFIX = """You are a SQL generator. Use the EXACT column names from the schema. 
 Produce ONLY one valid SQL SELECT statement. Do not add explanations. 
 Dates must be in 'YYYY-MM-DD' format."""
 
+# Builds the prompt
 def build_prompt(schema_text, user_question):
     examples = "\n\n".join([f"NL: \"{ex['nl']}\"\nSQL: {ex['sql']}" for ex in FEW_SHOT_EXAMPLES])
     prompt = f"""{PROMPT_PREFIX}
@@ -44,6 +48,7 @@ NL: "{user_question}"
 SQL:"""
     return prompt
 
+# Generates the sql query
 def generate_sql_with_gemini(schema_text, user_question, model=MODEL):
     prompt = build_prompt(schema_text, user_question)
     

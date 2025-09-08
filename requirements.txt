@@ -1,3 +1,7 @@
+# Note: Make .env file and add gemini api key (GEMINI_API_KEY=AIza...) before running the project
+
+# Install: 
+
 streamlit
 python-dotenv
 sqlparse
