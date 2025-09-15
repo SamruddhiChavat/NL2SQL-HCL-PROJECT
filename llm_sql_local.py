@@ -1,5 +1,4 @@
 # llm_sql_local.py
-
 import os
 import ollama
 from dotenv import load_dotenv
@@ -30,11 +29,16 @@ FEW_SHOT_EXAMPLES = [
         "sql": "SELECT AVG(repair_cost) AS avg_cost FROM defects WHERE defect_location = 'Assembly A' AND defect_date BETWEEN '2024-01-01' AND '2024-03-31';"
     },
     {
-    "nl": "Show defects from last 7 days",
-    "sql": "SELECT * FROM defects WHERE defect_date >= date('now', '-7 day');"
-},
+        "nl": "Show defects from last 7 days",
+        "sql": "SELECT * FROM defects WHERE defect_date >= date('now', '-7 day');"
+    },
 
+        {
+        "nl": "Show defects from last week",
+        "sql": "SELECT * FROM defects WHERE defect_date >= date('now', '-7 day');"
+    },
 ]
+
 PROMPT_PREFIX = """You are a SQL generator for SQLite. Use the EXACT column names from the schema. 
 Produce ONLY one valid SQL SELECT statement. Do not add explanations. 
 Dates must be in 'YYYY-MM-DD' format.
@@ -63,6 +67,28 @@ Examples:
 NL: "{user_question}"
 SQL:"""
 
+    def clean_sql(self, sql_text: str) -> str:
+        sql = sql_text.strip()
+
+        # Remove markdown or SQL labels
+        sql = sql.replace("SQL:", "").replace("sql:", "").strip()
+        if sql.startswith("```"):
+            sql = sql.strip("`")
+            if sql.lower().startswith("sql"):
+                sql = sql[3:].strip()
+
+        # Normalize operators (LLMs sometimes give ≥ instead of >=)
+        sql = sql.replace("≥", ">=").replace("≤", "<=")
+
+        # Extract the first SELECT and keep rest
+        lines = [line.strip() for line in sql.splitlines() if line.strip()]
+        for i, line in enumerate(lines):
+            if line.lower().startswith("select"):
+                return line + " " + " ".join(lines[i+1:])
+
+        raise ValueError(f"No valid SELECT found in output: {sql}")
+
+
     def generate_sql(self, schema_text: str, user_question: str, examples=None) -> str:
         prompt = self.build_prompt(schema_text, user_question, examples)
 
@@ -75,7 +101,8 @@ SQL:"""
                     messages=[{"role": "user", "content": prompt}]
                 )
                 self.model = model_name  # Update to the working model
-                return response["message"]["content"].strip()
+                raw_sql = response["message"]["content"].strip()
+                return self.clean_sql(raw_sql)
 
             except ResponseError as e:
                 if "requires more system memory" in str(e):
