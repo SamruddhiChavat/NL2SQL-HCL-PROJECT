@@ -1,42 +1,77 @@
+# app.py  
 import streamlit as st
-from schema_utils import schema_to_text
-from llm_sql import generate_sql_with_gemini
-from db_exec import run_sql
+from schema_utils import SchemaUtils
+from llm_sql import GeminiSQL
+from db_exec import DBExecutor
 
-# Displays the page title
-st.set_page_config(page_title="NL → SQL Queries - POC", layout="wide")
-st.title("NL → SQL — defects_data POC")
+class NL2SQLApp:
+    def __init__(self, db_path="defects.db", table="defects"):
+        self.schema = SchemaUtils(db_path)
+        self.llm = GeminiSQL()
+        self.db = DBExecutor(db_path, table)
+        self.table = table
 
-# Displays the database schema
-schema_text = schema_to_text('defects')
-st.markdown("Database Schema:")
-st.text(schema_text)
+        # Initialize chat history
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
 
-user_q = st.text_input("Enter your query about defects here in natural language")
+    def run(self):
+        st.set_page_config(page_title="NL → SQL Plugin", layout="centered")
+        st.title("💬 NL → SQL Chatbot")
 
-# The 'generate sql' button
-if st.button("Generate SQL & Execute"):
-    if not user_q.strip():
-        st.error("Enter a question.")
-    else:
-        try:
-            # 1. Generates SQL
-            sql = generate_sql_with_gemini(schema_text, user_q)
-            st.subheader("Generated SQL Query:")
-            st.code(sql, language="sql")
+        # Clear chat button
+        if st.button("🧹 Clear Chat"):
+            st.session_state.messages = []
+            st.rerun()
 
-            # 2. Executes the generated SQL Query
-            df = run_sql(sql, limit=500)
+        # Show schema in expander
+        schema_text = self.schema.schema_to_text(self.table)
+        with st.expander("📑 View schema"):
+            st.text(schema_text)
 
-            # 3. Shows result count
-            st.success(f"Rows returned: {len(df)}")
+        # Render previous messages
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
 
-            # 4. If single value (COUNT, AVG, SUM) shows as metric
-            if df.shape[0] == 1 and df.shape[1] == 1:
-                value = df.iat[0, 0]
-                st.metric(label="Answer", value=value)
-            else:
-                st.dataframe(df)
+        # Chat input
+        if user_q := st.chat_input("Ask me in natural language…"):
+            # Save + show user question
+            st.session_state.messages.append({"role": "user", "content": user_q})
+            with st.chat_message("user"):
+                st.markdown(user_q)
 
-        except Exception as e:
-            st.error(str(e))
+            try:
+                # Generate SQL
+                sql = self.llm.generate_sql(schema_text, user_q)
+                sql_preview = f"Here’s the SQL query:\n```sql\n{sql}\n```"
+
+                st.session_state.messages.append({"role": "assistant", "content": sql_preview})
+                with st.chat_message("assistant"):
+                    st.markdown(sql_preview)
+
+                # Execute SQL
+                df = self.db.run_sql(sql, limit=200)
+                if not df.empty:
+                    result_msg = f"📊 Query returned {len(df)} rows:"
+                    st.session_state.messages.append({"role": "assistant", "content": result_msg})
+
+                    with st.chat_message("assistant"):
+                        st.markdown(result_msg)
+                        st.dataframe(df)
+                else:
+                    nores_msg = "⚠️ No results found."
+                    st.session_state.messages.append({"role": "assistant", "content": nores_msg})
+                    with st.chat_message("assistant"):
+                        st.warning("No results found.")
+
+            except Exception as e:
+                err_msg = f"❌ Error: {e}"
+                st.session_state.messages.append({"role": "assistant", "content": err_msg})
+                with st.chat_message("assistant"):
+                    st.error(err_msg)
+
+
+if __name__ == "__main__":
+    app = NL2SQLApp()
+    app.run()
