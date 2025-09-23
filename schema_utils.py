@@ -27,3 +27,8 @@ class SchemaUtils:
         tables = self.list_tables()
         schemas = [self.schema_to_text(t) for t in tables]
         return "\n\n".join(schemas)
+
+
+def get_db_schema_text(db_path: str = "manufacturing.db") -> str:
+    utils = SchemaUtils(db_path)
+    return utils.all_schemas_to_text()

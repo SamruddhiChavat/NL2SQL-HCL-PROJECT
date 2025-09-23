@@ -20,7 +20,7 @@ class GeminiSQL:
         },
         {
             "nl": "Show all inspection methods used for defects",
-            "sql": "SELECT im.inspection_method FROM inspection_methods im JOIN defects d ON d.method_id = im.method_id;"
+            "sql": "SELECT DISTINCT im.inspection_method FROM inspection_methods im JOIN defects d ON d.method_id = im.method_id;"
         },
         {
             "nl": "Average repair_cost for defects in Assembly A between 2024-01-01 and 2024-03-31",
@@ -28,18 +28,29 @@ class GeminiSQL:
         }
     ]
 
-    PROMPT_PREFIX = """You are a SQL generator for a SQLite database with multiple tables.
-- Use the EXACT column names and table names from the schema provided below.
-- If you reference a column that exists in more than one table, qualify it as table.column.
-- Produce ONLY one valid SQL SELECT statement. Do not add explanations or extra text in the SQL response.
-- If the user's question is better answered with a short textual statement (e.g., "No, those are the only X in the database"), include a short assistant text reply in plain English after the SQL. Format:
+    PROMPT_PREFIX = """You are an expert SQL generator for a SQLite database with multiple tables.
+
+Follow these rules carefully:
+- Use ONLY the exact column names and table names from the schema provided.
+- If a column name appears in multiple tables, qualify it with table alias (e.g., d.defect_id).
+- Always use explicit JOINs when fetching data across tables.
+- Always return exactly ONE SQL SELECT query unless explicitly instructed otherwise.
+- Do NOT invent columns or tables not present in the schema.
+- Dates:
+  - Convert natural language dates to 'YYYY-MM-DD'.
+  - If the date is already in 'YYYY-MM-DD', leave it unchanged.
+  - If the date is given in another format (e.g., 'DD-MM-YYYY'), reply with: NOTE: Please provide the date in 'YYYY-MM-DD' format.
+- Output format:
+  Always respond in the format:
   SQL:
-  <single select statement>
-  NOTE: <short English sentence answering or clarifying the user's intent>
-- Use JOINs if necessary to fetch columns from multiple tables.
-- Date handling rules:
-  - If user gives dates in natural language (e.g., '1 January 2024 to 3 March 2024'), convert them into 'YYYY-MM-DD' format in the SQL query.
-  - If user already gives dates in 'YYYY-MM-DD' format, keep them as is. If user gives the date in different formats like 'DD-MM-YYYY' then ask the user to enter the date in 'YYYY-MM-DD' format.
+  <single SQL SELECT statement>
+  NOTE: <optional short English clarification if needed>
+
+Think step by step:
+1. Identify relevant tables and columns from schema.
+2. Decide necessary JOINs and filters.
+3. Write the final SQL query using correct syntax.
+4. Optionally add a NOTE if clarification is needed.
 """
 
     def __init__(self, model=MODEL):

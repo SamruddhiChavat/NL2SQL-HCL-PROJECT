@@ -1,78 +1,82 @@
 import pandas as pd
-import sqlite3
+from sqlalchemy import create_engine
+from dotenv import load_dotenv
+import os
+import random
 
-def prepare_database(csv_file, db_file):
-    df = pd.read_csv(csv_file)
+load_dotenv()
 
-    conn = sqlite3.connect(db_file)
-    cur = conn.cursor()
+class DataPrep:
+    def __init__(self, csv_path="defects_data.csv", db_path="defects.db"):
+        self.csv_path = csv_path
+        self.db_path = db_path
 
-    # Drops old tables if they exist
-    cur.execute("DROP TABLE IF EXISTS defects")
-    cur.execute("DROP TABLE IF EXISTS products")
-    cur.execute("DROP TABLE IF EXISTS inspection_methods")
+    def load_and_clean(self):
+        df = pd.read_csv(self.csv_path, dtype=str)
 
-    # Creates new normalized tables
-    cur.execute("""
-        CREATE TABLE products (
-            product_id TEXT PRIMARY KEY
-        )
-    """)
+        # Trim column names
+        df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
 
-    cur.execute("""
-        CREATE TABLE inspection_methods (
-            method_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            inspection_method TEXT,
-            defect_location TEXT
-        )
-    """)
+        # Normalize product_id globally (avoid join mismatches)
+        if 'product_id' in df.columns:
+            df['product_id'] = df['product_id'].astype(str).str.strip().str.upper()
 
-    cur.execute("""
-        CREATE TABLE defects (
-            defect_id TEXT PRIMARY KEY,
-            product_id TEXT,
-            method_id INTEGER,
-            defect_type TEXT,
-            defect_date TEXT,
-            severity TEXT,
-            repair_cost FLOAT,
-            FOREIGN KEY (product_id) REFERENCES products(product_id),
-            FOREIGN KEY (method_id) REFERENCES inspection_methods(method_id)
-        )
-    """)
+        # Parse defect_date
+        if 'defect_date' in df.columns:
+            df['defect_date'] = pd.to_datetime(df['defect_date'], errors='coerce')
+            df['defect_date'] = df['defect_date'].dt.strftime('%Y-%m-%d')
 
-    # Inserts unique products
-    products = df['product_id'].dropna().unique()
-    cur.executemany("INSERT INTO products (product_id) VALUES (?)", [(p,) for p in products])
+        # repair_cost numeric
+        if 'repair_cost' in df.columns:
+            df['repair_cost'] = pd.to_numeric(df['repair_cost'], errors='coerce')
 
-    # Inserts unique inspection methods with location
-    inspection_pairs = df[['inspection_method', 'defect_location']].drop_duplicates()
-    cur.executemany("INSERT INTO inspection_methods (inspection_method, defect_location) VALUES (?, ?)",
-                    [tuple(row) for row in inspection_pairs.values])
+        # normalize text columns (besides product_id which we already handled)
+        text_cols = ['defect_type', 'defect_location', 'severity', 'inspection_method']
+        for c in text_cols:
+            if c in df.columns:
+                df[c] = df[c].astype(str).str.strip().replace({'nan': None})
 
-    # Maps inspection_method + defect_location to method_id
-    method_map = {}
-    for row in cur.execute("SELECT method_id, inspection_method, defect_location FROM inspection_methods"):
-        method_map[(row[1], row[2])] = row[0]
+        # drop duplicates
+        df = df.drop_duplicates()
 
-    # Inserts defects with proper foreign keys
-    for _, row in df.iterrows():
-        method_id = method_map.get((row['inspection_method'], row['defect_location']))
-        cur.execute("""
-            INSERT INTO defects (defect_id, product_id, method_id, defect_type, defect_date, severity, repair_cost)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            row['defect_id'],
-            row['product_id'],
-            method_id,
-            row['defect_type'],
-            row['defect_date'],
-            row['severity'],
-            row['repair_cost']
-        ))
+        # drop missing defect_id
+        if 'defect_id' in df.columns:
+            df = df.dropna(subset=['defect_id'])
 
-    conn.commit()
-    conn.close()
+        # fill missing severity
+        if 'severity' in df.columns:
+            df['severity'] = df['severity'].fillna('Unknown')
+
+        return df
+
+    def create_sqlite(self, df):
+        engine = create_engine(f"sqlite:///{self.db_path}", connect_args={"check_same_thread": False})
+
+        # ---- Create products table ----
+        unique_products = df[['product_id']].drop_duplicates().copy()
+        product_lines = ['Line A', 'Line B', 'Line C']
+        manufacturers = ['Acme Corp', 'Globex Inc', 'Umbrella Co']
+
+        # Add dummy data
+        unique_products['product_line'] = [random.choice(product_lines) for _ in range(len(unique_products))]
+        unique_products['manufacturer'] = [random.choice(manufacturers) for _ in range(len(unique_products))]
+
+        unique_products.to_sql('products', engine, if_exists='replace', index=False)
+
+        # ---- Create inspection_methods table ----
+        unique_methods = df[['inspection_method', 'defect_location']].drop_duplicates().copy()
+        unique_methods.rename(columns={'defect_location': 'default_location'}, inplace=True)
+        unique_methods.to_sql('inspection_methods', engine, if_exists='replace', index=False)
+
+        # ---- Update defects table ----
+        defects_cols = ['defect_id', 'product_id', 'defect_type', 'defect_date',
+                        'defect_location', 'severity', 'inspection_method', 'repair_cost']
+        defects_df = df[defects_cols].copy()
+        defects_df.to_sql('defects', engine, if_exists='replace', index=False)
+
+        return f"Database created with {len(defects_df)} defects, {len(unique_products)} products, {len(unique_methods)} inspection methods."
 
 if __name__ == "__main__":
-    prepare_database("defects_data.csv", "defects.db")
+    prep = DataPrep()
+    df = prep.load_and_clean()
+    print(prep.create_sqlite(df))
