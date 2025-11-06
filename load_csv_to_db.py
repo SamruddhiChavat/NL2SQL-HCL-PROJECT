@@ -4,7 +4,7 @@ import sqlite3
 # Load the CSV file
 df = pd.read_csv('defects_data.csv')
 
-# Connect to SQLite (this creates data.db if it doesn't exist)
+# Connect to SQLite 
 conn = sqlite3.connect('data.db')
 
 # Write the DataFrame to a new table called 'defects'
