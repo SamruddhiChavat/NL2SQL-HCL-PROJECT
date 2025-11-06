@@ -2,12 +2,11 @@
 import os
 import ollama
 from dotenv import load_dotenv
-from ollama._types import ResponseError  # For catching memory errors
+from ollama._types import ResponseError  
 
-# Load environment variables
 load_dotenv()
 
-# Model fallback preference order (first = preferred, last = lightest)
+# Model fallback preference order 
 MODEL_FALLBACK_LIST = [
     "phi",
     "mistral",
