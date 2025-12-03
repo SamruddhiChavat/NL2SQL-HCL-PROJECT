@@ -1,10 +1,7 @@
-# Note: Make .env file and add gemini api key (GEMINI_API_KEY=AIza...) before running the project
-
-# Install: 
-
 streamlit
+sqlalchemy
+pandas
+pyodbc
 python-dotenv
 sqlparse
-pandas
-google-generativeai
-sqlalchemy
+ollama

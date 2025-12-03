@@ -1,0 +1,15 @@
+{"nl": "Show top 10 sellers by number of orders", "gold_sql": "SELECT seller_id, COUNT(order_id) AS total_orders FROM order_items GROUP BY seller_id ORDER BY total_orders DESC LIMIT 10;"}
+{"nl": "Show total revenue per seller", "gold_sql": "SELECT seller_id, SUM(price) AS total_revenue FROM order_items GROUP BY seller_id;"}
+{"nl": "Show top 10 products by number of reviews", "gold_sql": "SELECT oi.product_id, COUNT(orv.review_id) AS review_count FROM order_items oi JOIN order_reviews orv ON oi.order_id = orv.order_id GROUP BY oi.product_id ORDER BY review_count DESC LIMIT 10;"}
+{"nl": "Show average review score per seller", "gold_sql": "SELECT oi.seller_id, AVG(orv.review_score) AS avg_score FROM order_items oi JOIN order_reviews orv ON oi.order_id = orv.order_id GROUP BY oi.seller_id;"}
+{"nl": "Show top 5 states by number of customers", "gold_sql": "SELECT customer_state, COUNT(customer_id) AS total_customers FROM customers GROUP BY customer_state ORDER BY total_customers DESC LIMIT 5;"}
+{"nl": "Show number of products per category", "gold_sql": "SELECT product_category_name, COUNT(product_id) AS total_products FROM products GROUP BY product_category_name;"}
+{"nl": "Show top 5 product categories by total revenue", "gold_sql": "SELECT p.product_category_name, SUM(oi.price) AS total_revenue FROM products p JOIN order_items oi ON p.product_id = oi.product_id GROUP BY p.product_category_name ORDER BY total_revenue DESC LIMIT 5;"}
+{"nl": "Show total number of orders per month in 2024", "gold_sql": "SELECT strftime('%Y-%m', order_purchase_timestamp) AS month, COUNT(order_id) AS total_orders FROM orders WHERE strftime('%Y', order_purchase_timestamp) = '2024' GROUP BY month ORDER BY month;"}
+{"nl": "Show top 5 customers with highest total payments", "gold_sql": "SELECT o.customer_id, SUM(op.payment_value) AS total_payment FROM orders o JOIN order_payments op ON o.order_id = op.order_id GROUP BY o.customer_id ORDER BY total_payment DESC LIMIT 5;"}
+{"nl": "Show average number of items per order", "gold_sql": "SELECT AVG(items_count) AS avg_items_per_order FROM (SELECT order_id, COUNT(*) AS items_count FROM order_items GROUP BY order_id);"}
+{"nl": "Show total freight value per seller", "gold_sql": "SELECT seller_id, SUM(freight_value) AS total_freight FROM order_items GROUP BY seller_id;"}
+{"nl": "Show customers with more than 5 orders", "gold_sql": "SELECT customer_id, COUNT(order_id) AS total_orders FROM orders GROUP BY customer_id HAVING total_orders > 5;"}
+{"nl": "Show top 5 products by average review score", "gold_sql": "SELECT oi.product_id, AVG(orv.review_score) AS avg_score FROM order_items oi JOIN order_reviews orv ON oi.order_id = orv.order_id GROUP BY oi.product_id ORDER BY avg_score DESC LIMIT 5;"}
+{"nl": "Show number of orders with payment type 'credit_card'", "gold_sql": "SELECT COUNT(DISTINCT order_id) AS total_orders FROM order_payments WHERE payment_type = 'credit_card';"}
+{"nl": "Show top 5 cities with most sellers", "gold_sql": "SELECT seller_city, COUNT(seller_id) AS total_sellers FROM sellers GROUP BY seller_city ORDER BY total_sellers DESC LIMIT 5;"}
