@@ -1,30 +1,24 @@
-# app.py
-import streamlit as st
+import os
 import pandas as pd
+import streamlit as st
 from sqlalchemy import create_engine, text
 from llm_sql_local import LocalLLM
-import os
 
-# --------------------------------------------------
-# 1. SQL SERVER CONNECTION
-# --------------------------------------------------
 
-# Correct fix: load from environment if available else fallback constant
 MSSQL_CONN = os.getenv("MSSQL_CONN")
 if MSSQL_CONN:
     CONN_STR = MSSQL_CONN
 else:
-    # DEFAULT working connection string
-    CONN_STR = "mssql+pyodbc://sa:1234@localhost/olist?driver=ODBC+Driver+17+for+SQL+Server"
+    CONN_STR = (
+        "mssql+pyodbc://sa:1234@localhost/olist"
+        "?driver=ODBC+Driver+17+for+SQL+Server"
+    )
 
 engine = create_engine(CONN_STR)
 
-# --------------------------------------------------
-# 2. EXTRACT SCHEMA FROM SQL SERVER (for RAG)
-# --------------------------------------------------
 
 def extract_schema_text() -> str:
-    schema_lines = []
+    schema_lines: list[str] = []
     with engine.connect() as conn:
         tables = conn.execute(text(
             "SELECT TABLE_NAME "
@@ -32,7 +26,6 @@ def extract_schema_text() -> str:
             "WHERE TABLE_TYPE = 'BASE TABLE' "
             "ORDER BY TABLE_NAME;"
         )).fetchall()
-
         for (table_name,) in tables:
             schema_lines.append(f"Table: {table_name}")
             cols = conn.execute(text(
@@ -41,29 +34,21 @@ def extract_schema_text() -> str:
                 "WHERE TABLE_NAME = :t "
                 "ORDER BY ORDINAL_POSITION;"
             ), {"t": table_name}).fetchall()
-
             for col_name, data_type in cols:
                 schema_lines.append(f"- {col_name} ({data_type})")
-            schema_lines.append("")  # blank line between tables
-
+            schema_lines.append("")
     return "\n".join(schema_lines)
 
-SCHEMA_TEXT = extract_schema_text()
 
-# --------------------------------------------------
-# 3. INIT LLM WITH SCHEMA (RAG setup)
-# --------------------------------------------------
+SCHEMA_TEXT = extract_schema_text()
 
 llm = LocalLLM(db_type="mssql")
 llm.set_schema(SCHEMA_TEXT)
 
-# --------------------------------------------------
-# 4. STREAMLIT UI
-# --------------------------------------------------
 
 st.set_page_config(page_title="NL → SQL Chatbot", layout="centered")
 st.title("NL → SQL Chatbot (SQL Server / RAG over Schema)")
-st.markdown("Connection: SQL Server database `olist` on `SQLEXPRESS`.")
+st.markdown("Connection: SQL Server database `olist`.")
 
 with st.expander("View extracted SQL Server schema"):
     st.text(SCHEMA_TEXT)
@@ -81,7 +66,7 @@ for msg in st.session_state.messages:
             st.markdown(content)
         else:
             st.markdown(content["text"])
-            st.dataframe(content["dataframe"], width="stretch")
+            st.dataframe(content["dataframe"], use_container_width=True)
 
 user_q = st.chat_input("Ask a question about the olist data (natural language)")
 if user_q:
@@ -90,17 +75,20 @@ if user_q:
         st.markdown(user_q)
 
     try:
-        norm_q = user_q.strip().lower()
-        norm_q = norm_q.rstrip(".?!")
-
+        norm_q = user_q.strip().lower().rstrip(".?!")
         direct_sql = None
 
         if norm_q in {"show all products", "list all products", "get all products"}:
             direct_sql = "SELECT TOP 200 * FROM products;"
+
         elif norm_q in {"show all orders", "list all orders", "get all orders"}:
             direct_sql = "SELECT TOP 200 * FROM orders;"
+
         elif norm_q in {"show all customers", "list all customers", "get all customers"}:
             direct_sql = "SELECT TOP 200 * FROM customers;"
+
+        elif norm_q in {"show all sellers", "list all sellers", "get all sellers"}:
+            direct_sql = "SELECT TOP 200 * FROM sellers;"
 
         elif norm_q in {
             "show the first 50 customers", "show 50 customers", "list 50 customers"
@@ -140,7 +128,8 @@ if user_q:
             direct_sql = (
                 "SELECT TOP 50 oi.order_id, oi.product_id, "
                 "p.product_category_name, oi.price, oi.freight_value "
-                "FROM order_items oi JOIN products p ON oi.product_id = p.product_id "
+                "FROM order_items oi "
+                "JOIN products p ON oi.product_id = p.product_id "
                 "ORDER BY oi.order_id;"
             )
 
@@ -160,10 +149,19 @@ if user_q:
                 "ORDER BY AveragePrice DESC;"
             )
 
+        if direct_sql is None and "top" in norm_q and "seller" in norm_q:
+            direct_sql = (
+                "SELECT TOP 20 oi.seller_id, COUNT(DISTINCT oi.order_id) AS total_orders "
+                "FROM order_items oi "
+                "GROUP BY oi.seller_id "
+                "ORDER BY total_orders DESC;"
+            )
+
         if direct_sql is None and "product categories" in norm_q:
             direct_sql = (
                 "SELECT DISTINCT product_category_name "
-                "FROM products WHERE product_category_name IS NOT NULL "
+                "FROM products "
+                "WHERE product_category_name IS NOT NULL "
                 "ORDER BY product_category_name;"
             )
 
@@ -205,7 +203,7 @@ WHERE LOWER(seller_city) = LOWER('{city_raw}')
         else:
             sql = llm.generate_sql(SCHEMA_TEXT, user_q, result_limit=200)
 
-        sql_preview = f"Generated SQL:\n```sql\n{sql}\n```"
+        sql_preview = f"Generated SQL:\n``````"
         st.session_state.messages.append({"role": "assistant", "content": sql_preview})
         with st.chat_message("assistant"):
             st.markdown(sql_preview)
@@ -215,10 +213,9 @@ WHERE LOWER(seller_city) = LOWER('{city_raw}')
 
         result_content = {"text": f"Query returned {len(df)} rows.", "dataframe": df}
         st.session_state.messages.append({"role": "assistant", "content": result_content})
-
         with st.chat_message("assistant"):
             st.markdown(f"Query returned {len(df)} rows.")
-            st.dataframe(df, width="stretch")
+            st.dataframe(df, use_container_width=True)
 
     except Exception as e:
         err_msg = f"Error: {e}"

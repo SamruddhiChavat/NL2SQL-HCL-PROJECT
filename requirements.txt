@@ -12,3 +12,5 @@ ollama
  peft 
  accelerate 
  safetensors
+
+//"mssql+pyodbc://sa:1234@localhost/olist?driver=ODBC+Driver+17+for+SQL+Server"
