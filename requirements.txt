@@ -5,3 +5,10 @@ pyodbc
 python-dotenv
 sqlparse
 ollama
+
+ transformers 
+ sentencepiece 
+ torch 
+ peft 
+ accelerate 
+ safetensors

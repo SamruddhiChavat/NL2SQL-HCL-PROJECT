@@ -1,113 +1,227 @@
-import os
-import re
+# app.py
 import streamlit as st
+import pandas as pd
+from sqlalchemy import create_engine, text
 from llm_sql_local import LocalLLM
-from db_exec import DBExecutor
-from schema_utils import SchemaUtils
+import os
 
-#  SQL SERVER activate
-os.environ["DB_TYPE"] = "mssql"
-DB_TYPE = "mssql"
+# --------------------------------------------------
+# 1. SQL SERVER CONNECTION
+# --------------------------------------------------
 
-# SQL Server connect
+# Correct fix: load from environment if available else fallback constant
 MSSQL_CONN = os.getenv("MSSQL_CONN")
-if not MSSQL_CONN:
-    raise RuntimeError(
-        "MSSQL_CONN env var not set!\n"
-        "Set it first: $env:MSSQL_CONN='mssql+pyodbc://sa:1234@localhost/olist?driver=ODBC+Driver+17+for+SQL+Server'"
-    )
+if MSSQL_CONN:
+    CONN_STR = MSSQL_CONN
+else:
+    # DEFAULT working connection string
+    CONN_STR = "mssql+pyodbc://sa:1234@localhost/olist?driver=ODBC+Driver+17+for+SQL+Server"
 
-# Setup SQL Server connections
-schema_util = SchemaUtils(MSSQL_CONN, db_type="mssql")
-llm = LocalLLM(db_type="mssql")  # SQL Server aware
-db = DBExecutor(conn_or_path=MSSQL_CONN, db_type="mssql")
-conn_info = "✅ Using SQL Server (your migrated olist database)"
+engine = create_engine(CONN_STR)
 
-class NL2SQLApp:
-    def __init__(self):
-        # schema_text used for prompts and displayed to user
-        self.schema_text = schema_util.all_schemas_to_text()
-        # LLM will set its internal schema when generate_sql is called,
-        # but set it explicitly once so it's parsed early (helps performance).
-        try:
-            llm.set_schema(self.schema_text)
-        except Exception:
-            # older versions or different LLM impls might not have set_schema; ignore safely
-            pass
-        self.llm = llm
-        self.db = db
+# --------------------------------------------------
+# 2. EXTRACT SCHEMA FROM SQL SERVER (for RAG)
+# --------------------------------------------------
 
-    def run(self):
-        if "messages" not in st.session_state:
-            st.session_state.messages = []
+def extract_schema_text() -> str:
+    schema_lines = []
+    with engine.connect() as conn:
+        tables = conn.execute(text(
+            "SELECT TABLE_NAME "
+            "FROM INFORMATION_SCHEMA.TABLES "
+            "WHERE TABLE_TYPE = 'BASE TABLE' "
+            "ORDER BY TABLE_NAME;"
+        )).fetchall()
 
-        st.set_page_config(page_title="NL → SQL (SQL Server)", layout="centered")
-        st.title("🗄 NL → SQL Chatbot (SQL Server)")
+        for (table_name,) in tables:
+            schema_lines.append(f"Table: {table_name}")
+            cols = conn.execute(text(
+                "SELECT COLUMN_NAME, DATA_TYPE "
+                "FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_NAME = :t "
+                "ORDER BY ORDINAL_POSITION;"
+            ), {"t": table_name}).fetchall()
 
-        st.markdown(f"*Connection:* {conn_info}")
-        with st.expander("🔍 View SQL Server schema (click to expand)"):
-            st.text(self.schema_text)
+            for col_name, data_type in cols:
+                schema_lines.append(f"- {col_name} ({data_type})")
+            schema_lines.append("")  # blank line between tables
 
-        
-        if st.button("🗑 Clear Chat"):
-            st.session_state.messages = []
+    return "\n".join(schema_lines)
 
-        
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                if isinstance(msg["content"], str):
-                    st.markdown(msg["content"])
-                elif isinstance(msg["content"], dict):
-                    if "text" in msg["content"]:
-                        st.markdown(msg["content"]["text"])
-                    if "dataframe" in msg["content"]:
-                        st.dataframe(msg["content"]["dataframe"])
+SCHEMA_TEXT = extract_schema_text()
 
-        
-        if user_q := st.chat_input("Ask me in natural language about your SQL Server data…"):
-            st.session_state.messages.append({"role": "user", "content": user_q})
-            with st.chat_message("user"):
-                st.markdown(user_q)
+# --------------------------------------------------
+# 3. INIT LLM WITH SCHEMA (RAG setup)
+# --------------------------------------------------
 
-            try:
-                # Generate SQL 
-                sql = self.llm.generate_sql(self.schema_text, user_q, result_limit=200)
+llm = LocalLLM(db_type="mssql")
+llm.set_schema(SCHEMA_TEXT)
 
-                
-                sql_preview = f"*Generated SQL:*\n```sql\n{sql}\n```"
-                st.session_state.messages.append({"role": "assistant", "content": sql_preview})
-                with st.chat_message("assistant"):
-                    st.markdown(sql_preview)
+# --------------------------------------------------
+# 4. STREAMLIT UI
+# --------------------------------------------------
 
-                
-                try:
-                    df = self.db.run_sql(sql, limit=200)
-                    if df is not None and not df.empty:
-                        result_msg = f"✅ Query returned *{len(df)} rows* from SQL Server:"
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": {"text": result_msg, "dataframe": df}
-                        })
-                        with st.chat_message("assistant"):
-                            st.markdown(result_msg)
-                            st.dataframe(df, use_container_width=True)
-                    else:
-                        nores_msg = "❌ No results found."
-                        st.session_state.messages.append({"role": "assistant", "content": nores_msg})
-                        with st.chat_message("assistant"):
-                            st.warning(nores_msg)
-                except Exception as db_err:
-                    err_text = f"❌ Database error: {db_err}"
-                    st.session_state.messages.append({"role": "assistant", "content": err_text})
-                    with st.chat_message("assistant"):
-                        st.error(err_text)
+st.set_page_config(page_title="NL → SQL Chatbot", layout="centered")
+st.title("NL → SQL Chatbot (SQL Server / RAG over Schema)")
+st.markdown("Connection: SQL Server database `olist` on `SQLEXPRESS`.")
 
-            except Exception as e:
-                err_msg = f"❌ Error generating SQL: {e}"
-                st.session_state.messages.append({"role": "assistant", "content": err_msg})
-                with st.chat_message("assistant"):
-                    st.error(err_msg)
+with st.expander("View extracted SQL Server schema"):
+    st.text(SCHEMA_TEXT)
 
-if __name__ == "__main__":
-    app = NL2SQLApp()
-    app.run()
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if st.button("Clear Chat", key="clear_chat_button"):
+    st.session_state.messages = []
+
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        content = msg["content"]
+        if isinstance(content, str):
+            st.markdown(content)
+        else:
+            st.markdown(content["text"])
+            st.dataframe(content["dataframe"], width="stretch")
+
+user_q = st.chat_input("Ask a question about the olist data (natural language)")
+if user_q:
+    st.session_state.messages.append({"role": "user", "content": user_q})
+    with st.chat_message("user"):
+        st.markdown(user_q)
+
+    try:
+        norm_q = user_q.strip().lower()
+        norm_q = norm_q.rstrip(".?!")
+
+        direct_sql = None
+
+        if norm_q in {"show all products", "list all products", "get all products"}:
+            direct_sql = "SELECT TOP 200 * FROM products;"
+        elif norm_q in {"show all orders", "list all orders", "get all orders"}:
+            direct_sql = "SELECT TOP 200 * FROM orders;"
+        elif norm_q in {"show all customers", "list all customers", "get all customers"}:
+            direct_sql = "SELECT TOP 200 * FROM customers;"
+
+        elif norm_q in {
+            "show the first 50 customers", "show 50 customers", "list 50 customers"
+        }:
+            direct_sql = (
+                "SELECT TOP 50 customer_id, customer_unique_id, "
+                "customer_zip_code_prefix, customer_city, customer_state "
+                "FROM customers ORDER BY customer_id;"
+            )
+
+        elif norm_q in {
+            "show 100 products with their dimensions and weight",
+            "show 100 products with dimensions and weight",
+            "show 100 products",
+        }:
+            direct_sql = (
+                "SELECT TOP 100 product_id, product_category_name, "
+                "product_weight_g, product_length_cm, product_height_cm, product_width_cm "
+                "FROM products ORDER BY product_id;"
+            )
+
+        elif norm_q in {
+            "show 50 sellers with their city and state",
+            "show the first 50 sellers",
+            "show 50 sellers",
+        }:
+            direct_sql = (
+                "SELECT TOP 50 seller_id, seller_city, seller_state "
+                "FROM sellers ORDER BY seller_city, seller_state;"
+            )
+
+        elif norm_q in {
+            "show 50 order items with product category and price",
+            "show 50 order items with product category",
+            "show 50 order items",
+        }:
+            direct_sql = (
+                "SELECT TOP 50 oi.order_id, oi.product_id, "
+                "p.product_category_name, oi.price, oi.freight_value "
+                "FROM order_items oi JOIN products p ON oi.product_id = p.product_id "
+                "ORDER BY oi.order_id;"
+            )
+
+        elif "customer city" in norm_q and "how many orders" in norm_q:
+            direct_sql = (
+                "SELECT TOP 200 c.customer_city, COUNT(o.order_id) AS OrderCount "
+                "FROM customers c JOIN orders o ON c.customer_id = o.customer_id "
+                "GROUP BY c.customer_city ORDER BY OrderCount DESC;"
+            )
+
+        elif "top 10 most expensive products" in norm_q:
+            direct_sql = (
+                "SELECT TOP 10 p.product_id, p.product_category_name, "
+                "AVG(oi.price) AS AveragePrice "
+                "FROM order_items oi JOIN products p ON oi.product_id = p.product_id "
+                "GROUP BY p.product_id, p.product_category_name "
+                "ORDER BY AveragePrice DESC;"
+            )
+
+        if direct_sql is None and "product categories" in norm_q:
+            direct_sql = (
+                "SELECT DISTINCT product_category_name "
+                "FROM products WHERE product_category_name IS NOT NULL "
+                "ORDER BY product_category_name;"
+            )
+
+        if direct_sql is None and norm_q in {
+            "show all seller cities", "list all seller cities", "get all seller cities"
+        }:
+            direct_sql = (
+                "SELECT DISTINCT seller_city, seller_state "
+                "FROM sellers ORDER BY seller_state, seller_city;"
+            )
+
+        if direct_sql is None and norm_q.startswith("get all sellers from"):
+            city_raw = user_q[len("get all sellers from"):].strip(" .?!")
+            if city_raw:
+                city_norm = (
+                    city_raw.replace("ã", "a").replace("á", "a")
+                            .replace("é", "e").replace("í", "i")
+                            .replace("ó", "o").replace("ú", "u")
+                )
+                direct_sql = f"""
+SELECT TOP 200 seller_id, seller_zip_code_prefix, seller_city, seller_state
+FROM sellers
+WHERE LOWER(seller_city) = LOWER('{city_raw}')
+   OR LOWER(seller_city) = LOWER('{city_norm}');
+"""
+
+        if norm_q in {"connection info", "who am i connected to", "db info"}:
+            with engine.connect() as conn:
+                db_name = conn.execute(text("SELECT DB_NAME();")).scalar()
+                server_name = conn.execute(text("SELECT @@SERVERNAME;")).scalar()
+            msg = f"Connected to database '{db_name}' on server '{server_name}'."
+            st.session_state.messages.append({"role": "assistant", "content": msg})
+            with st.chat_message("assistant"):
+                st.markdown(msg)
+            st.stop()
+
+        if direct_sql is not None:
+            sql = direct_sql
+        else:
+            sql = llm.generate_sql(SCHEMA_TEXT, user_q, result_limit=200)
+
+        sql_preview = f"Generated SQL:\n```sql\n{sql}\n```"
+        st.session_state.messages.append({"role": "assistant", "content": sql_preview})
+        with st.chat_message("assistant"):
+            st.markdown(sql_preview)
+
+        with engine.connect() as conn:
+            df = pd.read_sql_query(text(sql), conn)
+
+        result_content = {"text": f"Query returned {len(df)} rows.", "dataframe": df}
+        st.session_state.messages.append({"role": "assistant", "content": result_content})
+
+        with st.chat_message("assistant"):
+            st.markdown(f"Query returned {len(df)} rows.")
+            st.dataframe(df, width="stretch")
+
+    except Exception as e:
+        err_msg = f"Error: {e}"
+        st.session_state.messages.append({"role": "assistant", "content": err_msg})
+        with st.chat_message("assistant"):
+            st.error(err_msg)
