@@ -1,8 +1,9 @@
-import os
-import pandas as pd
+# app.py
 import streamlit as st
+import pandas as pd
 from sqlalchemy import create_engine, text
 from llm_sql_local import LocalLLM
+import os
 
 
 MSSQL_CONN = os.getenv("MSSQL_CONN")
@@ -10,15 +11,18 @@ if MSSQL_CONN:
     CONN_STR = MSSQL_CONN
 else:
     CONN_STR = (
-        "mssql+pyodbc://sa:1234@localhost/olist"
-        "?driver=ODBC+Driver+17+for+SQL+Server"
-    )
+    "mssql+pyodbc://sa:1234@localhost/olist"
+    "?driver=ODBC+Driver+17+for+SQL+Server"
+)
+
 
 engine = create_engine(CONN_STR)
 
 
+
+
 def extract_schema_text() -> str:
-    schema_lines: list[str] = []
+    schema_lines = []
     with engine.connect() as conn:
         tables = conn.execute(text(
             "SELECT TABLE_NAME "
@@ -26,6 +30,7 @@ def extract_schema_text() -> str:
             "WHERE TABLE_TYPE = 'BASE TABLE' "
             "ORDER BY TABLE_NAME;"
         )).fetchall()
+
         for (table_name,) in tables:
             schema_lines.append(f"Table: {table_name}")
             cols = conn.execute(text(
@@ -34,21 +39,26 @@ def extract_schema_text() -> str:
                 "WHERE TABLE_NAME = :t "
                 "ORDER BY ORDINAL_POSITION;"
             ), {"t": table_name}).fetchall()
+
             for col_name, data_type in cols:
                 schema_lines.append(f"- {col_name} ({data_type})")
             schema_lines.append("")
+
     return "\n".join(schema_lines)
 
 
 SCHEMA_TEXT = extract_schema_text()
 
+
+
 llm = LocalLLM(db_type="mssql")
 llm.set_schema(SCHEMA_TEXT)
 
 
+
 st.set_page_config(page_title="NL → SQL Chatbot", layout="centered")
 st.title("NL → SQL Chatbot (SQL Server / RAG over Schema)")
-st.markdown("Connection: SQL Server database `olist`.")
+st.markdown("Connection: SQL Server database `olist` on `SQLEXPRESS`.")
 
 with st.expander("View extracted SQL Server schema"):
     st.text(SCHEMA_TEXT)
@@ -66,7 +76,10 @@ for msg in st.session_state.messages:
             st.markdown(content)
         else:
             st.markdown(content["text"])
-            st.dataframe(content["dataframe"], use_container_width=True)
+            st.dataframe(content["dataframe"], width="stretch")
+
+
+
 
 user_q = st.chat_input("Ask a question about the olist data (natural language)")
 if user_q:
@@ -75,9 +88,13 @@ if user_q:
         st.markdown(user_q)
 
     try:
-        norm_q = user_q.strip().lower().rstrip(".?!")
+        norm_q = user_q.strip().lower()
+        norm_q = norm_q.rstrip(".?!")
+
         direct_sql = None
 
+
+       
         if norm_q in {"show all products", "list all products", "get all products"}:
             direct_sql = "SELECT TOP 200 * FROM products;"
 
@@ -87,124 +104,78 @@ if user_q:
         elif norm_q in {"show all customers", "list all customers", "get all customers"}:
             direct_sql = "SELECT TOP 200 * FROM customers;"
 
-        elif norm_q in {"show all sellers", "list all sellers", "get all sellers"}:
-            direct_sql = "SELECT TOP 200 * FROM sellers;"
 
-        elif norm_q in {
-            "show the first 50 customers", "show 50 customers", "list 50 customers"
-        }:
-            direct_sql = (
-                "SELECT TOP 50 customer_id, customer_unique_id, "
-                "customer_zip_code_prefix, customer_city, customer_state "
-                "FROM customers ORDER BY customer_id;"
-            )
-
-        elif norm_q in {
-            "show 100 products with their dimensions and weight",
-            "show 100 products with dimensions and weight",
-            "show 100 products",
-        }:
-            direct_sql = (
-                "SELECT TOP 100 product_id, product_category_name, "
-                "product_weight_g, product_length_cm, product_height_cm, product_width_cm "
-                "FROM products ORDER BY product_id;"
-            )
-
-        elif norm_q in {
-            "show 50 sellers with their city and state",
-            "show the first 50 sellers",
-            "show 50 sellers",
-        }:
-            direct_sql = (
-                "SELECT TOP 50 seller_id, seller_city, seller_state "
-                "FROM sellers ORDER BY seller_city, seller_state;"
-            )
-
-        elif norm_q in {
-            "show 50 order items with product category and price",
-            "show 50 order items with product category",
-            "show 50 order items",
-        }:
-            direct_sql = (
-                "SELECT TOP 50 oi.order_id, oi.product_id, "
-                "p.product_category_name, oi.price, oi.freight_value "
-                "FROM order_items oi "
-                "JOIN products p ON oi.product_id = p.product_id "
-                "ORDER BY oi.order_id;"
-            )
-
-        elif "customer city" in norm_q and "how many orders" in norm_q:
-            direct_sql = (
-                "SELECT TOP 200 c.customer_city, COUNT(o.order_id) AS OrderCount "
-                "FROM customers c JOIN orders o ON c.customer_id = o.customer_id "
-                "GROUP BY c.customer_city ORDER BY OrderCount DESC;"
-            )
-
-        elif "top 10 most expensive products" in norm_q:
-            direct_sql = (
-                "SELECT TOP 10 p.product_id, p.product_category_name, "
-                "AVG(oi.price) AS AveragePrice "
-                "FROM order_items oi JOIN products p ON oi.product_id = p.product_id "
-                "GROUP BY p.product_id, p.product_category_name "
-                "ORDER BY AveragePrice DESC;"
-            )
-
-        if direct_sql is None and "top" in norm_q and "seller" in norm_q:
-            direct_sql = (
-                "SELECT TOP 20 oi.seller_id, COUNT(DISTINCT oi.order_id) AS total_orders "
-                "FROM order_items oi "
-                "GROUP BY oi.seller_id "
-                "ORDER BY total_orders DESC;"
-            )
-
-        if direct_sql is None and "product categories" in norm_q:
-            direct_sql = (
-                "SELECT DISTINCT product_category_name "
-                "FROM products "
-                "WHERE product_category_name IS NOT NULL "
-                "ORDER BY product_category_name;"
-            )
-
-        if direct_sql is None and norm_q in {
-            "show all seller cities", "list all seller cities", "get all seller cities"
-        }:
-            direct_sql = (
-                "SELECT DISTINCT seller_city, seller_state "
-                "FROM sellers ORDER BY seller_state, seller_city;"
-            )
-
-        if direct_sql is None and norm_q.startswith("get all sellers from"):
-            city_raw = user_q[len("get all sellers from"):].strip(" .?!")
-            if city_raw:
-                city_norm = (
-                    city_raw.replace("ã", "a").replace("á", "a")
-                            .replace("é", "e").replace("í", "i")
-                            .replace("ó", "o").replace("ú", "u")
-                )
-                direct_sql = f"""
-SELECT TOP 200 seller_id, seller_zip_code_prefix, seller_city, seller_state
-FROM sellers
-WHERE LOWER(seller_city) = LOWER('{city_raw}')
-   OR LOWER(seller_city) = LOWER('{city_norm}');
+        
+        if direct_sql is None and ("customer" in norm_q and "city" in norm_q):
+            direct_sql = """
+SELECT DISTINCT customer_city, customer_state
+FROM customers
+WHERE customer_city IS NOT NULL
+ORDER BY customer_city;
 """
 
-        if norm_q in {"connection info", "who am i connected to", "db info"}:
-            with engine.connect() as conn:
-                db_name = conn.execute(text("SELECT DB_NAME();")).scalar()
-                server_name = conn.execute(text("SELECT @@SERVERNAME;")).scalar()
-            msg = f"Connected to database '{db_name}' on server '{server_name}'."
-            st.session_state.messages.append({"role": "assistant", "content": msg})
-            with st.chat_message("assistant"):
-                st.markdown(msg)
-            st.stop()
 
+       
+        if direct_sql is None and ("seller" in norm_q and "city" in norm_q):
+            direct_sql = """
+SELECT DISTINCT seller_city, seller_state
+FROM sellers
+WHERE seller_city IS NOT NULL
+ORDER BY seller_city;
+"""
+
+
+       
+        if direct_sql is None and ("delivered" in norm_q):
+            direct_sql = """
+SELECT TOP 200 *
+FROM orders
+WHERE order_status = 'delivered';
+"""
+
+
+        if direct_sql is None and ("weight" in norm_q or "gram" in norm_q):
+            direct_sql = """
+SELECT TOP 200 *
+FROM products
+WHERE product_weight_g IS NOT NULL
+ORDER BY product_weight_g DESC;
+"""
+
+
+       
+        if direct_sql is None and "customers from" in norm_q:
+            try:
+                city = user_q.lower().split("from")[1].strip()
+                direct_sql = f"""
+SELECT TOP 200 *
+FROM customers
+WHERE LOWER(customer_city) = LOWER('{city}');
+"""
+            except:
+                pass
+
+
+        if direct_sql is None and "product categories" in norm_q:
+            direct_sql = """
+SELECT DISTINCT product_category_name
+FROM products
+WHERE product_category_name IS NOT NULL
+ORDER BY product_category_name;
+"""
+
+
+        
         if direct_sql is not None:
             sql = direct_sql
         else:
             sql = llm.generate_sql(SCHEMA_TEXT, user_q, result_limit=200)
 
-        sql_preview = f"Generated SQL:\n``````"
+
+        
+        sql_preview = f"Generated SQL:\n```sql\n{sql}\n```"
         st.session_state.messages.append({"role": "assistant", "content": sql_preview})
+
         with st.chat_message("assistant"):
             st.markdown(sql_preview)
 
@@ -213,9 +184,10 @@ WHERE LOWER(seller_city) = LOWER('{city_raw}')
 
         result_content = {"text": f"Query returned {len(df)} rows.", "dataframe": df}
         st.session_state.messages.append({"role": "assistant", "content": result_content})
+
         with st.chat_message("assistant"):
             st.markdown(f"Query returned {len(df)} rows.")
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width="stretch")
 
     except Exception as e:
         err_msg = f"Error: {e}"

@@ -3,5 +3,7 @@ venv/
 __pycache__/
 *.pyc
 model/models/
+models/flan_t5_nl2sql_merged
+
 
 

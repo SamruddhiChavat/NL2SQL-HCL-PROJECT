@@ -1,279 +1,265 @@
-import os
+#llm_sql_local.py
+
 import re
-import torch
-from dotenv import load_dotenv
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-from peft import PeftModel
-
-load_dotenv()
-
-
-PROMPT_PREFIX_MSSQL = """You are a SQL generator for Microsoft SQL Server (T-SQL).
-
-RULES:
-- Return exactly ONE valid SQL SELECT statement and nothing else.
-- Use only the tables/columns listed in the Schema below.
-- Use T-SQL date functions (YEAR, MONTH, DATEPART, FORMAT) where needed.
-- Prefer fully-qualified columns (table.column) when there is any ambiguity.
-- Use JOINs based on foreign keys when multiple tables are required.
-- Never modify or create tables; only read data.
-- Never add any explanation or extra text.
-"""
-
-PROMPT_PREFIX_SQLITE = """You are a SQL generator for SQLite.
-
-RULES:
-- Return exactly ONE valid SQL SELECT statement and nothing else.
-- Use only the tables/columns listed in the Schema below.
-- Use SQLite date functions (STRFTIME) where needed.
-- Prefer fully-qualified columns (table.column) when there is any ambiguity.
-- Use JOINs based on foreign keys when multiple tables are required.
-- Never modify or create tables; only read data.
-- Never add any explanation or extra text.
-"""
-
-FEW_SHOT_EXAMPLES = [
-    {
-        "nl": "Which customers placed the highest number of orders?",
-        "sql": (
-            "SELECT o.customer_id, COUNT(o.order_id) AS total_orders "
-            "FROM orders o "
-            "GROUP BY o.customer_id "
-            "ORDER BY total_orders DESC;"
-        ),
-    },
-    {
-        "nl": "Monthly sales for 2017 (sales come from order_items.price)",
-        "sql": (
-            "SELECT DATEPART(year, oi.shipping_limit_date) AS year, "
-            "DATEPART(month, oi.shipping_limit_date) AS month, "
-            "SUM(oi.price) AS total_sales "
-            "FROM order_items oi "
-            "WHERE DATEPART(year, oi.shipping_limit_date) = 2017 "
-            "GROUP BY DATEPART(year, oi.shipping_limit_date), "
-            "DATEPART(month, oi.shipping_limit_date) "
-            "ORDER BY year, month;"
-        ),
-    },
-    {
-        "nl": "Show sellers and the total number of distinct products they sell",
-        "sql": (
-            "SELECT oi.seller_id, COUNT(DISTINCT oi.product_id) AS total_products "
-            "FROM order_items oi "
-            "GROUP BY oi.seller_id "
-            "ORDER BY total_products DESC;"
-        ),
-    },
-    {
-        "nl": "Orders where freight_value is above average and payment is by credit_card",
-        "sql": (
-            "SELECT o.order_id, o.customer_id, pct.product_category_name_english "
-            "FROM order_items oi "
-            "JOIN orders o ON oi.order_id = o.order_id "
-            "JOIN products p ON oi.product_id = p.product_id "
-            "LEFT JOIN product_category_name_translation pct "
-            "ON p.product_category_name = pct.product_category_name "
-            "WHERE oi.freight_value > (SELECT AVG(freight_value) FROM order_items) "
-            "AND EXISTS (SELECT 1 FROM order_payments op "
-            "WHERE op.order_id = o.order_id AND op.payment_type = 'credit_card');"
-        ),
-    },
-    {
-        "nl": "Show the top 20 sellers by number of orders",
-        "sql": (
-            "SELECT TOP 20 oi.seller_id, COUNT(DISTINCT oi.order_id) AS total_orders "
-            "FROM order_items oi "
-            "GROUP BY oi.seller_id "
-            "ORDER BY total_orders DESC;"
-        ),
-    },
-]
+from flan_sql_local import FlanSQLLLM
 
 
 class LocalLLM:
-    def __init__(self, db_type: str = "mssql"):
+    def __init__(self, db_type="mssql"):
         self.db_type = db_type.lower()
-        self.device = "cpu"
+        self.flan = FlanSQLLLM()
 
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-
-        base_model_path = os.path.join(base_dir, "model", "models", "flan_t5_base")
-        lora_path = os.path.join(base_dir, "nl2sql-lora-trained")
-
-        if not os.path.exists(os.path.join(lora_path, "adapter_config.json")):
-            raise FileNotFoundError(f"adapter_config.json not found in {lora_path}")
-        if not os.path.exists(base_model_path):
-            raise FileNotFoundError(f"Base model not found at {base_model_path}")
-
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            base_model_path,
-            local_files_only=True
-        )
-
-        base_model = AutoModelForSeq2SeqLM.from_pretrained(
-            base_model_path,
-            local_files_only=True,
-            torch_dtype=torch.float32
-        )
-
-        self.model = PeftModel.from_pretrained(
-            base_model,
-            lora_path,
-            local_files_only=True
-        )
-        self.model.eval()
-
-        self.schema_text: str | None = None
-        self.schema_info: dict[str, list[str]] = {}
-        self.col_to_tables: dict[str, set[str]] = {}
+        self.schema_text = None
+        self.schema_info = {}
 
     def set_schema(self, schema_text: str):
         self.schema_text = schema_text
         self.schema_info = {}
+
         table = None
         for line in schema_text.splitlines():
             line = line.strip()
             if not line:
                 continue
-            m = re.match(r"Table:\s*(\S+)", line)
-            if m:
-                table = m.group(1)
+
+            if line.startswith("Table:"):
+                table = line.split("Table:")[1].strip()
                 self.schema_info[table] = []
                 continue
-            m2 = re.match(r"[-*]\s*([a-zA-Z0-9_]+)", line)
-            if m2 and table:
-                self.schema_info[table].append(m2.group(1))
 
-        self.col_to_tables = {}
-        for t, cols in self.schema_info.items():
-            for c in cols:
-                self.col_to_tables.setdefault(c.lower(), set()).add(t)
+            if line.startswith("-"):
+                col = line.split()[1]
+                self.schema_info[table].append(col)
 
-    def _build_per_table_block(self, table: str) -> str:
-        cols = self.schema_info.get(table, [])
-        lines = [f"Table: {table}"]
-        for c in cols:
-            lines.append(f"- {c}")
-        return "\n".join(lines)
 
-    def get_relevant_schema(self, user_question: str, top_k: int = 5) -> str:
-        if not self.schema_info:
-            return self.schema_text or ""
-        uq_tokens = set(re.findall(r"[a-zA-Z_]+", user_question.lower()))
-        scored: list[tuple[int, str]] = []
-        for table, cols in self.schema_info.items():
-            tokens = set([table.lower()] + [c.lower() for c in cols])
-            scored.append((len(tokens & uq_tokens), table))
-        scored.sort(reverse=True)
-        chosen = [t for s, t in scored if s > 0][:top_k] or [t for _, t in scored[:top_k]]
-        return "\n\n".join(self._build_per_table_block(t) for t in chosen)
+    def detect_intent(self, question: str):
+        q = question.lower()
 
-    def build_prompt(self, user_question: str) -> str:
-        if self.schema_text is None:
-            raise RuntimeError("Schema not set.")
-        prefix = PROMPT_PREFIX_MSSQL if self.db_type == "mssql" else PROMPT_PREFIX_SQLITE
-        relevant_schema = self.get_relevant_schema(user_question)
-        examples_text = "\n\n".join(
-            [f'NL: "{ex["nl"]}"\nSQL: {ex["sql"]}' for ex in FEW_SHOT_EXAMPLES]
-        )
-        return f"""{prefix}
+        priority_intents = {
+            "avg_delay": [
+                "average delay",
+                "avg delivery delay",
+                "mean delay",
+                "average late days"
+            ],
 
-Schema:
-{relevant_schema}
+            "late_orders": [
+                "late orders",
+                "orders delivered late",
+                "delayed orders",
+                "delayed delivery",
+                "late delivery"
+            ],
 
-Examples:
-{examples_text}
+            "orders_per_payment": [
+                "how many orders per payment type",
+                "orders per payment",
+                "payment orders count",
+                "payment vs orders"
+            ],
 
-NL: "{user_question}"
-SQL:
+            "revenue": [
+                "revenue",
+                "payment revenue",
+                "sales",
+                "earnings",
+                "payment analytics"
+            ],
+
+            "heavy_products": [
+                "heavy",
+                "weight",
+                "grams",
+                "> 500",
+                "greater than"
+            ],
+
+            "top_sellers": [
+                "top sellers",
+                "best sellers",
+                "most sellers"
+            ],
+
+            "customer_city": [
+                "customer city",
+                "customer cities"
+            ],
+
+            "seller_city": [
+                "seller city",
+                "seller cities"
+            ],
+
+            "reviews": [
+                "reviews",
+                "rating",
+                "score"
+            ],
+        }
+
+        for key, keywords in priority_intents.items():
+            for k in keywords:
+                if k in q:
+                    return key
+
+        if "products" in q:
+            return "list_products"
+
+        if "customers" in q:
+            return "list_customers"
+
+        if "orders" in q:
+            return "list_orders"
+
+        return "unknown"
+
+
+    def template_sql(self, intent):
+        templates = {
+            "list_customers": "SELECT TOP 200 * FROM customers;",
+
+            "list_products": "SELECT TOP 200 * FROM products;",
+
+            "list_orders": "SELECT TOP 200 * FROM orders;",
+
+            "delivered_orders": """
+SELECT TOP 200 *
+FROM orders
+WHERE order_status = 'delivered'
+ORDER BY order_purchase_timestamp DESC;
+""",
+
+            "customer_city": """
+SELECT DISTINCT customer_city, customer_state
+FROM customers
+WHERE customer_city IS NOT NULL
+ORDER BY customer_city;
+""",
+
+            "seller_city": """
+SELECT DISTINCT seller_city, seller_state
+FROM sellers
+WHERE seller_city IS NOT NULL
+ORDER BY seller_city;
+""",
+
+            "top_sellers": """
+SELECT TOP 20 
+    oi.seller_id,
+    COUNT(DISTINCT oi.order_id) AS total_orders,
+    COUNT(DISTINCT oi.product_id) AS total_products
+FROM order_items oi
+GROUP BY oi.seller_id
+ORDER BY total_orders DESC;
+""",
+
+            "heavy_products": """
+SELECT TOP 200 *
+FROM products
+WHERE product_weight_g IS NOT NULL
+AND product_weight_g > 500
+ORDER BY product_weight_g DESC;
+""",
+
+            "revenue": """
+SELECT 
+    p.payment_type,
+    COUNT(*) AS total_orders,
+    SUM(p.payment_value) AS total_revenue
+FROM order_payments p
+GROUP BY p.payment_type
+ORDER BY total_revenue DESC;
+""",
+
+            "orders_per_payment": """
+SELECT 
+    p.payment_type,
+    COUNT(*) AS total_orders
+FROM order_payments p
+GROUP BY p.payment_type
+ORDER BY total_orders DESC;
+""",
+
+            "avg_delay": """
+SELECT 
+    AVG(DATEDIFF(
+        day,
+        o.order_estimated_delivery_date,
+        o.order_delivered_customer_date
+    )) AS avg_delay_days
+FROM orders o
+WHERE o.order_delivered_customer_date IS NOT NULL;
+""",
+
+            "late_orders": """
+SELECT TOP 200
+    o.order_id,
+    o.order_status,
+    o.order_estimated_delivery_date,
+    o.order_delivered_customer_date
+FROM orders o
+WHERE o.order_delivered_customer_date IS NOT NULL
+AND o.order_delivered_customer_date > o.order_estimated_delivery_date
+ORDER BY o.order_delivered_customer_date DESC;
+""",
+
+            "reviews": """
+SELECT TOP 200
+    r.order_id,
+    r.review_score,
+    r.review_comment_title,
+    r.review_comment_message
+FROM order_reviews r
+ORDER BY r.review_score ASC;
 """
+        }
 
-    def clean_sql(self, sql_text: str) -> str:
-        text = sql_text.strip().strip("`")
-        if text.lower() in {"undefined", "null", "none", ""}:
-            raise ValueError("Model returned no valid SQL text.")
-        m = re.search(r"(SELECT\b.*?;)", text, re.I | re.S)
-        sql = m.group(1).strip() if m else text
+        return templates.get(intent, None)
+
+
+    def clean_sql(self, sql: str):
+        sql = sql.strip()
+
         if not sql.lower().startswith("select"):
-            raise ValueError("No SELECT found in model output.")
+            raise ValueError("Generated SQL is not a SELECT query")
+
+        dangerous = ["drop", "delete", "truncate", "update", "insert"]
+        for d in dangerous:
+            if d in sql.lower():
+                raise ValueError("Unsafe SQL detected")
+
         if not sql.endswith(";"):
             sql += ";"
+
         return sql
 
-    def _engine_fixes(self, sql: str) -> str:
-        s = re.sub(r"EXTRACT\s*\(\s*YEAR\s+FROM\s*([^)]+)\)", r"YEAR(\1)", sql, flags=re.I)
-        if self.db_type == "mssql":
-            s = re.sub(r"STRFTIME\s*\(\s*'%Y'\s*,\s*([^)]+)\)", r"YEAR(\1)", s, flags=re.I)
-            s = re.sub(r"STRFTIME\s*\(\s*'%m'\s*,\s*([^)]+)\)", r"MONTH(\1)", s, flags=re.I)
-            s = re.sub(r"\s+LIMIT\s+\d+\s*;?$", ";", s, flags=re.I)
-            s = re.sub(r"(?i)SELECT\s+TOP\s+(\d+)\s+DISTINCT", r"SELECT DISTINCT TOP \1", s)
-        return s
 
-    def _auto_prefix_columns(self, sql: str) -> str:
-        tokens = set(re.findall(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\b", sql))
-        keywords = {
-            "select", "from", "where", "join", "on", "group", "by", "order", "as",
-            "and", "or", "sum", "avg", "count", "distinct", "year", "month",
-            "top", "limit", "inner", "left", "right", "outer"
-        }
-        for tok in sorted(tokens, key=len, reverse=True):
-            if tok.lower() in keywords:
-                continue
-            tables = self.col_to_tables.get(tok.lower())
-            if tables and len(tables) == 1:
-                table = list(tables)[0]
-                sql = re.sub(rf"\b{tok}\b", f"{table}.{tok}", sql)
-        return sql
+    def generate_sql(self, schema_text, question: str, result_limit=200):
 
-    def _apply_limit_style(self, sql: str, limit: int) -> str:
-        if limit is None:
-            return sql
-        if self.db_type == "sqlite":
-            if "limit" in sql.lower():
-                return sql
-            return sql.rstrip().rstrip(";") + f" LIMIT {limit};"
-        if " top " in sql.lower():
-            return sql
-        return re.sub(r"SELECT", f"SELECT TOP {limit}", sql, 1, flags=re.I)
-
-    def generate_sql(self, schema_text: str, user_question: str,
-                     result_limit: int = 200) -> str:
         if self.schema_text != schema_text:
             self.set_schema(schema_text)
 
-        prompt = self.build_prompt(user_question)
+        intent = self.detect_intent(question)
+        template = self.template_sql(intent)
 
-        print("\n[MODEL] Starting generation...")
-        print(f"[MODEL] Question: {user_question}")
+        if template:
+            return self.clean_sql(template)
 
-        try:
-            inputs = self.tokenizer(
-                prompt,
-                return_tensors="pt",
-                truncation=True,
-                max_length=1024
-            )
+        # LLM fallback
+        prompt = f"""
+You are a strict SQL Server query generator.
+Generate ONE correct SQL query only.
 
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=256,
-                    do_sample=False,
-                    num_beams=4,
-                )
+Schema:
+{schema_text}
 
-            raw_sql = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            print("[MODEL] Raw output:")
-            print(raw_sql)
+Question: {question}
+SQL:
+"""
+        raw = self.flan.generate(prompt)
+        sql = self.clean_sql(raw)
 
-            sql = self.clean_sql(raw_sql)
-            sql = self._engine_fixes(sql)
-            sql = self._auto_prefix_columns(sql)
-            sql = self._apply_limit_style(sql, result_limit)
+        if "top" not in sql.lower():
+            sql = sql.replace("SELECT", f"SELECT TOP {result_limit} ")
 
-            print("[MODEL] Finished successfully.\n")
-            return sql
-
-        except Exception as e:
-            print(f"[MODEL] FAILED with error: {e}\n")
-            raise
+        return sql
