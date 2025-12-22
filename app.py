@@ -1,77 +1,191 @@
-# app.py  
+# app.py
 import streamlit as st
-from schema_utils import SchemaUtils
-from llm_sql import GeminiSQL
-from db_exec import DBExecutor
+import pandas as pd
+from sqlalchemy import create_engine, text
+from llm_sql_local import LocalLLM
+import os
 
-class NL2SQLApp:
-    def __init__(self, db_path="defects.db", table="defects"):
-        self.schema = SchemaUtils(db_path)
-        self.llm = GeminiSQL()
-        self.db = DBExecutor(db_path, table)
-        self.table = table
+MSSQL_CONN = os.getenv("MSSQL_CONN")
+if MSSQL_CONN:
+    CONN_STR = MSSQL_CONN
+else:
+    CONN_STR = (
+    "mssql+pyodbc:///?odbc_connect="
+    "Driver={ODBC Driver 18 for SQL Server};"
+    "Server=localhost\\SQLEXPRESS;"
+    "Database=olist;"
+    "UID=sa;"
+    "PWD=YOURPASSWORD;"
+    "Encrypt=yes;"
+    "TrustServerCertificate=yes;"
+)
 
-        # Initialize chat history
-        if "messages" not in st.session_state:
-            st.session_state.messages = []
+engine = create_engine(CONN_STR)
 
-    def run(self):
-        st.set_page_config(page_title="NL → SQL Plugin", layout="centered")
-        st.title("💬 NL → SQL Chatbot")
 
-        # Clear chat button
-        if st.button("🧹 Clear Chat"):
-            st.session_state.messages = []
-            st.rerun()
+def extract_schema_text() -> str:
+    schema_lines = []
+    with engine.connect() as conn:
+        tables = conn.execute(text(
+            "SELECT TABLE_NAME "
+            "FROM INFORMATION_SCHEMA.TABLES "
+            "WHERE TABLE_TYPE = 'BASE TABLE' "
+            "ORDER BY TABLE_NAME;"
+        )).fetchall()
 
-        # Show schema in expander
-        schema_text = self.schema.schema_to_text(self.table)
-        with st.expander("📑 View schema"):
-            st.text(schema_text)
+        for (table_name,) in tables:
+            schema_lines.append(f"Table: {table_name}")
+            cols = conn.execute(text(
+                "SELECT COLUMN_NAME, DATA_TYPE "
+                "FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_NAME = :t "
+                "ORDER BY ORDINAL_POSITION;"
+            ), {"t": table_name}).fetchall()
 
-        # Render previous messages
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+            for col_name, data_type in cols:
+                schema_lines.append(f"- {col_name} ({data_type})")
+            schema_lines.append("")
 
-        # Chat input
-        if user_q := st.chat_input("Ask me in natural language…"):
-            # Save + show user question
-            st.session_state.messages.append({"role": "user", "content": user_q})
-            with st.chat_message("user"):
-                st.markdown(user_q)
+    return "\n".join(schema_lines)
 
+
+SCHEMA_TEXT = extract_schema_text()
+
+llm = LocalLLM(db_type="mssql")
+llm.set_schema(SCHEMA_TEXT)
+
+
+st.set_page_config(page_title="NL → SQL Chatbot", layout="centered")
+st.title("NL → SQL Chatbot (SQL Server / RAG over Schema)")
+st.markdown("Connection: SQL Server database `olist` on `SQLEXPRESS`.")
+
+with st.expander("View extracted SQL Server schema"):
+    st.text(SCHEMA_TEXT)
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if st.button("Clear Chat", key="clear_chat_button"):
+    st.session_state.messages = []
+
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        content = msg["content"]
+        if isinstance(content, str):
+            st.markdown(content)
+        else:
+            st.markdown(content["text"])
+            st.dataframe(content["dataframe"], width="stretch")
+
+
+user_q = st.chat_input("Ask a question about the olist data (natural language)")
+if user_q:
+    st.session_state.messages.append({"role": "user", "content": user_q})
+    with st.chat_message("user"):
+        st.markdown(user_q)
+
+    try:
+        norm_q = user_q.strip().lower()
+        norm_q = norm_q.rstrip(".?!")
+        direct_sql = None
+
+        if norm_q in {"show all products", "list all products", "get all products"}:
+            direct_sql = "SELECT TOP 200 * FROM products;"
+
+        elif norm_q in {"show all orders", "list all orders", "get all orders"}:
+            direct_sql = "SELECT TOP 200 * FROM orders;"
+
+        elif norm_q in {"show all customers", "list all customers", "get all customers"}:
+            direct_sql = "SELECT TOP 200 * FROM customers;"
+
+        elif norm_q in {"show all sellers", "list all sellers", "get all sellers", "show sellers", "list sellers"}:
+            direct_sql = "SELECT TOP 200 * FROM sellers;"
+
+
+        if direct_sql is None and ("customer" in norm_q and "city" in norm_q):
+            direct_sql = """
+SELECT DISTINCT customer_city, customer_state
+FROM customers
+WHERE customer_city IS NOT NULL
+ORDER BY customer_city;
+"""
+
+        if direct_sql is None and "sellers from" in norm_q:
             try:
-                # Generate SQL
-                sql = self.llm.generate_sql(schema_text, user_q)
-                sql_preview = f"Here’s the SQL query:\n```sql\n{sql}\n```"
+                city = user_q.lower().split("from")[1].strip()
+                direct_sql = f"""
+SELECT TOP 200 *
+FROM sellers
+WHERE LOWER(seller_city) = LOWER('{city}');
+"""
+            except:
+                pass
 
-                st.session_state.messages.append({"role": "assistant", "content": sql_preview})
-                with st.chat_message("assistant"):
-                    st.markdown(sql_preview)
+        if direct_sql is None and ("seller" in norm_q and "city" in norm_q):
+            direct_sql = """
+SELECT DISTINCT seller_city, seller_state
+FROM sellers
+WHERE seller_city IS NOT NULL
+ORDER BY seller_city;
+"""
 
-                # Execute SQL
-                df = self.db.run_sql(sql, limit=200)
-                if not df.empty:
-                    result_msg = f"📊 Query returned {len(df)} rows:"
-                    st.session_state.messages.append({"role": "assistant", "content": result_msg})
+        if direct_sql is None and ("delivered" in norm_q):
+            direct_sql = """
+SELECT TOP 200 *
+FROM orders
+WHERE order_status = 'delivered';
+"""
 
-                    with st.chat_message("assistant"):
-                        st.markdown(result_msg)
-                        st.dataframe(df)
-                else:
-                    nores_msg = "⚠️ No results found."
-                    st.session_state.messages.append({"role": "assistant", "content": nores_msg})
-                    with st.chat_message("assistant"):
-                        st.warning("No results found.")
+        if direct_sql is None and ("weight" in norm_q or "gram" in norm_q):
+            direct_sql = """
+SELECT TOP 200 *
+FROM products
+WHERE product_weight_g IS NOT NULL
+ORDER BY product_weight_g DESC;
+"""
 
-            except Exception as e:
-                err_msg = f"❌ Error: {e}"
-                st.session_state.messages.append({"role": "assistant", "content": err_msg})
-                with st.chat_message("assistant"):
-                    st.error(err_msg)
+        if direct_sql is None and "customers from" in norm_q:
+            try:
+                city = user_q.lower().split("from")[1].strip()
+                direct_sql = f"""
+SELECT TOP 200 *
+FROM customers
+WHERE LOWER(customer_city) = LOWER('{city}');
+"""
+            except:
+                pass
 
+        if direct_sql is None and "product categories" in norm_q:
+            direct_sql = """
+SELECT DISTINCT product_category_name
+FROM products
+WHERE product_category_name IS NOT NULL
+ORDER BY product_category_name;
+"""
 
-if __name__ == "__main__":
-    app = NL2SQLApp()
-    app.run()
+        if direct_sql is not None:
+            sql = direct_sql
+        else:
+            sql = llm.generate_sql(SCHEMA_TEXT, user_q, result_limit=200)
+
+        sql_preview = f"Generated SQL:\n```sql\n{sql}\n```"
+        st.session_state.messages.append({"role": "assistant", "content": sql_preview})
+
+        with st.chat_message("assistant"):
+            st.markdown(sql_preview)
+
+        with engine.connect() as conn:
+            df = pd.read_sql_query(text(sql), conn)
+
+        result_content = {"text": f"Query returned {len(df)} rows.", "dataframe": df}
+        st.session_state.messages.append({"role": "assistant", "content": result_content})
+
+        with st.chat_message("assistant"):
+            st.markdown(f"Query returned {len(df)} rows.")
+            st.dataframe(df, width="stretch")
+
+    except Exception as e:
+        err_msg = f"Error: {e}"
+        st.session_state.messages.append({"role": "assistant", "content": err_msg})
+        with st.chat_message("assistant"):
+            st.error(err_msg)

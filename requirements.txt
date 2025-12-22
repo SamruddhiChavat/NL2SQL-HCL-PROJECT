@@ -1,10 +1,1 @@
-# Note: Make .env file and add gemini api key (GEMINI_API_KEY=AIza...) before running the project
-
-# Install: 
-
-streamlit
-python-dotenv
-sqlparse
-pandas
-google-generativeai
-sqlalchemy
+flaskpyodbcsqlalchemypandaspython-dotenvsqlparsetransformers==4.39.0torchacceleratepeftsentencepiecesafetensorsstreamlit"mssql+pyodbc://sa:1234@localhost/olist?driver=ODBC+Driver+17+for+SQL+Server"
